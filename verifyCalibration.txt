@@ -1,0 +1,148 @@
+import cv2
+import numpy as np
+import glob
+import math
+from calibration import criteria, reSize, objp, cam_mtx, coeffDist
+
+fx = cam_mtx[0, 0]
+fy = cam_mtx[1, 1]
+cx = cam_mtx[0, 2]
+cy = cam_mtx[1, 2]
+
+test_objPoints = []
+test_imgPoints = []
+
+# Load samples with the foreign object in a list
+test_images = glob.glob('testSamples/*.jpg')
+
+if test_images is False:
+    print("No images were found. Please verify location and filetype (expecting '.jpg').")
+
+else:
+    # We redo the mapping process but we don't need the camera matrix from this. Just the object/image points.
+    for i in test_images:
+        img = cv2.resize(cv2.imread(i), reSize, interpolation = cv2.INTER_AREA)
+        cvtGray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # grayscale conversion is required by OpenCV
+        cv2.imshow('Raw Input', img)
+
+        # Find the chess board corners. 'corner_found' is a bool value to check whether corners are found or not
+        corner_found, corners = cv2.findChessboardCorners(cvtGray, (9, 6), None)  # rows first, columns second
+
+        # If corners successfully found, append to object points' matrix. Refine, and append to image points' matrix
+        if corner_found is True:
+            test_objPoints.append(objp)
+
+            cornersRefined = cv2.cornerSubPix(cvtGray, corners, (4, 4), (-1, -1), criteria)
+            test_imgPoints.append(cornersRefined)
+
+            img = cv2.drawChessboardCorners(img, (9, 6), cornersRefined, corner_found)
+            cv2.imshow('Input w/ Corners Drawn', img)
+            cv2.waitKey(1)
+
+cv2.destroyAllWindows()
+
+# Using solvePnP to get the extrinsics from the above object/image points from above, and the camera matrix/distortion
+# coefficients from the calibration process.
+_, rotV, transV, _ = cv2.solvePnPRansac(test_objPoints[0], test_imgPoints[0], cam_mtx, coeffDist)
+
+np.set_printoptions(suppress = True)  # removes the exponential 'e+xx' format of float printing
+print("\nThis is our world origin in pixels:", (test_imgPoints[0])[0])
+
+# Reconstructing 3x3 rotation matrix from 3x1 rotation vector using Rodrigues' conversion, and creating the extrinsic
+# matrix by stacking the translation vector to the right of rotation matrix.
+rotM, _ = cv2.Rodrigues(rotV)
+extM = np.hstack((rotM, transV))
+
+# Initializing matrix with world co-ordinates of the foreign object
+X, Y, Z = (-3.01, 12.05, 6.00)  # order: [Y, X, Z]; [X, Y, Z] if we swap the first two columns of objp in calibration.py
+Obj_ws = np.array([[X], [Y], [Z], [1]])
+
+print("\nThis is the 3x3 rotation matrix:\n", rotM, "\nOrder:", rotM.shape)
+print("\nThis is the 3x1 translation vector:\n", transV, "\nOrder:", transV.shape)
+print("\nFORWARD PROBLEM: 'Given the XYZ world space points of an object, find the corresponding UV points in the image"
+      " space.")
+print("--------", "\nINPUT(s)", "\n--------")
+print("\nThe 3x4 extrinsic matrix, formed from the RM and TV:\n", extM, "\nOrder:", extM.shape)
+print("\nThe world co-ordinates vector:\n", Obj_ws, "\nOrder:", Obj_ws.shape)
+print("\n---------", "\nOUTPUT(s)", "\n---------")
+
+# Calculating the image space co-ordinates from: WS Co-ordinates, Extrinsic Matrix, Camera Intrinsic Matrix. The final
+# form is a 3x1 vector.
+print("The scale factor is introduced:\n", extM.dot(Obj_ws))  # This shows that the scale factor is introduced in
+                                                              # this step
+Obj_uv = cam_mtx.dot(extM.dot(Obj_ws))  # .dot is used for matrix multiplication, it is not the same as *
+print("\nThe SCALED image/pixel co-ordinates vector:\n", Obj_uv)
+
+# Since the RHS of this equation has an extra dimension, we must scale it down by the last element, which is the
+# scaling factor. We will save this for the reverse problem as well.
+scaleFact = Obj_uv[2]
+print("\nThis is the scaling factor:", scaleFact)
+Obj_uv = Obj_uv/scaleFact
+result = cv2.imread("testSamples (Resized)/testIMG01.jpg")
+result = cv2.circle(result, (int(Obj_uv[0]), int(Obj_uv[1])), 10, (0, 0, 255), 2)
+result = cv2.putText(result, "(u: " + str(int(Obj_uv[0])) + ", v: " + str(int(Obj_uv[1])) + ")",
+                     (int(Obj_uv[0] - 150), int(Obj_uv[1] - 30)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 200), 2)
+cv2.imshow("FORWARD PROBLEM - Result", result)
+print("\nThe UNSCALED image/pixel co-ordinates vector:\n", Obj_uv, "\nOrder:", Obj_uv.shape)
+
+# Now, we extracted the pixel information of the object using... paint? We will now do the inverse of above operation;
+# that is, we will input the UV co-ordinates instead, and see if we get the XYZ.
+
+# Initializing the image points extracted from paint. Could use selectROI but either way this takes user input. In case
+# of object detection, contours would be used to find these points.
+u, v = (466, 569)
+Obj_uv2 = np.array([[u], [v], [1]])
+print("\n********************\n********************\n********************")
+print("\nREVERSE PROBLEM: 'Given the UV image space points of an object, find the corresponding XYZ points in the world"
+      " space.")
+
+inv_cm = np.linalg.inv(cam_mtx)
+inv_rotM = rotM.T
+inv_extM = np.ones((3, 4), np.float32)
+inv_extM[0:3, 0:3] = inv_rotM
+inv_extM[0:3, 3] = (-1*inv_rotM.dot(transV))[0:3, 0]
+print("--------", "\nINPUT(s)", "\n--------")
+print("\nThe image (pixel) co-ordinates:", (u, v))
+print("\nThe inverse of camera matrix:\n", inv_cm)
+print("\nThe inverse of rotation matrix:\n", inv_rotM)
+print("\nThe inverse of the extrinsic matrix:\n", inv_extM)
+
+print("\n---------", "\nOUTPUT(s)", "\n---------")
+
+# 1st Approach --- Finalized answer for reverse problem with extrinsic matrix
+scaleFact = 1  # manually setting scaling to 1, only the angles are needed
+print("...Utilizing the 1st approach, with the inverse of the extrinsic matrix...")
+cam_coords = scaleFact*inv_cm.dot(Obj_uv2)
+print("\nThe camera coordinates (at a specified scale factor) are:\n", cam_coords)
+x = np.vstack((cam_coords, [1]))
+print("\nAdding an extra row to make conformable for multiplication with inverse extrinsic matrix:\n", x)
+x = inv_extM.dot(x)
+print("\nMultiplying the inverse extrinsic matrix with the appended camera matrix, giving the world coordinates"
+      ":\n", x)
+
+# 2nd Approach --- Finalized answer for reverse problem with separate rotation and translation matrices
+Obj_ws2 = inv_rotM.dot(scaleFact*inv_cm.dot(Obj_uv2) - transV)
+print("\n...Utilizing the 2nd approach, the equation with separate rotation matrix and translation vector...")
+print("\nThe world co-ordinates (manually scaled) are:\n", Obj_ws2)
+
+# Extract XYZ and store, then calculate angles
+X = Obj_ws2[0]
+Y = Obj_ws2[1]
+Z = Obj_ws2[2]
+
+angleLR = math.degrees(math.atan( Y / X ))
+angleUD = math.degrees(math.atan( Z / math.sqrt( X**2 + Y**2 )))
+print("\nLR Angle w.r.t World =", angleLR)
+print("UD Angle w.r.t World =", angleUD)
+
+Xc = cam_coords[0]
+Yc = cam_coords[1]
+Zc = cam_coords[2]
+
+angleLR_cam = math.degrees(math.atan( Xc / Zc ))
+angleUD_cam = math.degrees(math.atan( Yc / math.sqrt( Zc**2 + Xc**2 )))
+print("\nLR Angle w.r.t Cam =", angleLR_cam)
+print("UD Angle w.r.t Cam =", angleUD_cam)
+
+cv2.waitKey(0)
+cv2.destroyAllWindows()
